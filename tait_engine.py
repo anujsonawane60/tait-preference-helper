@@ -34,6 +34,7 @@ import json
 import os
 import re
 import sys
+import threading
 import unicodedata
 import warnings
 from collections import Counter, defaultdict
@@ -73,6 +74,14 @@ FILENAME_RE = re.compile(
 # at least one letter keeps it from matching the pay scale's '(18000)'.
 PREF_CODE_RE = re.compile(r'\((\d{4}[0-9A-Za-z]{2,20})\)')
 DESIGNATION_RE = re.compile(r'Teacher|Lecturer|Instructor|HeadMaster|Principal', re.IGNORECASE)
+
+# PyMuPDF is NOT thread-safe, and a Streamlit server runs every visitor's script
+# in its own thread. Parsing two preference PDFs at the same moment silently
+# corrupts both - measured: a 1,098-row file came back as 487, 489 and 334 rows
+# on three concurrent runs, with no exception raised. Every entry point that
+# touches fitz holds this lock, so parses queue instead of interleaving.
+# The corpus build is unaffected: it uses separate processes, not threads.
+_FITZ_LOCK = threading.Lock()
 
 # Reservation roster rows, keyed by the serial number in column 1.
 CATEGORIES = {
@@ -438,9 +447,17 @@ def parse_preference_pdf(source):
 
     `source` is a path or a bytes-like object (Streamlit upload). Returns a
     list of dicts, one per listed school-post.
+
+    Serialised on _FITZ_LOCK - see the note there. Two candidates uploading at
+    the same instant would otherwise both receive a truncated list.
     """
     import fitz
 
+    with _FITZ_LOCK:
+        return _parse_preference_pdf_locked(fitz, source)
+
+
+def _parse_preference_pdf_locked(fitz, source):
     if isinstance(source, (bytes, bytearray)):
         doc = fitz.open(stream=bytes(source), filetype='pdf')
     else:

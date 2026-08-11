@@ -31,7 +31,7 @@ def get_cache(key):
 # Both caches are bounded. With several people using the app all day an unbounded
 # cache would keep every candidate's parsed PDF and every generated report in
 # memory until the process was restarted.
-@st.cache_data(show_spinner=False, max_entries=16, ttl=3600)
+@st.cache_data(show_spinner='Reading your PDF…', max_entries=16, ttl=3600)
 def get_prefs(file_bytes):
     return E.parse_preference_pdf(file_bytes)
 
