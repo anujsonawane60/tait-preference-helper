@@ -1,0 +1,34 @@
+# Candidates' personal documents. A Generated Preferences PDF carries a real
+# person's name and their full eligible-school list - never commit one, and
+# never to a public repository.
+GeneratedPreferences*.pdf
+*_With*Interview.pdf
+prefs/
+uploads/
+
+# Advertisement corpora - 509 MB of source PDFs. The app does not read these at
+# runtime; cache/*.json is what the server needs. Rebuild with:
+#   python tait_engine.py build all
+ALL_PDF's/
+ALL_PDF'sequals/
+ALL_PDF's_Without_Interview/
+allPDF's/
+
+# Generated output
+*.csv
+!requirements.txt
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
