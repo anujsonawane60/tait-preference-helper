@@ -37,13 +37,13 @@ def get_prefs(file_bytes):
 
 
 @st.cache_data(show_spinner='Building PDF…', max_entries=8, ttl=1800)
-def build_pdf(df, category, label, person, parallel):
+def build_pdf(df, category, label, person, parallel, disability):
     """Cached so a report is not rebuilt while the same table is on screen."""
     return tait_report.build_report(df, category, label, person=person,
-                                    parallel=list(parallel))
+                                    parallel=list(parallel), disability=disability)
 
 
-def render_stream(key, upload, category, parallel, person):
+def render_stream(key, upload, category, parallel, person, disability):
     """Render one recruitment stream: filters, table and download button.
 
     Widget keys carry both the stream and the uploaded file's id. The stream part
@@ -123,8 +123,17 @@ def render_stream(key, upload, category, parallel, person):
                    'currently unticked — those schools will show 0 posts. Tick them back '
                    'on unless you meant to exclude them.', icon='⚠️')
 
-    only_matches = st.checkbox('Show only schools with a vacancy in my subject',
+    f1, f2 = st.columns(2)
+    only_matches = f1.checkbox('Show only schools with a vacancy in my subject',
                                key=f'{wk}_only')
+    only_disability = False
+    if disability:
+        only_disability = f2.checkbox(
+            f'Show only schools with a {E.DISABILITY_LABEL[disability]} post',
+            key=f'{wk}_onlydiv',
+            help='Divyang posts are scarce — this can cut a long list down to a '
+                 'handful of schools. Leave it off to keep the full list and sort '
+                 'by the divyang column instead.')
 
     rows, columns = E.analyse(prefs, index,
                               subjects=chosen_subjects or None,
@@ -132,29 +141,47 @@ def render_stream(key, upload, category, parallel, person):
                               designations=chosen_designations or None,
                               aid_types=chosen_aid or None,
                               employers=chosen_employers or None,
-                              parallel=parallel)
+                              parallel=parallel,
+                              disability=disability,
+                              only_disability=only_disability)
     df = pd.DataFrame(rows, columns=columns)
     if only_matches:
         df = df[df['Match'] == 'Yes']
     if df.empty:
-        st.info('Nothing matches these filters. Try widening the subject or level choice.')
+        st.info('Nothing matches these filters. Try widening the subject or level '
+                'choice' + (', or untick the divyang-only filter — most schools '
+                            'advertise no divyang post at all.' if only_disability
+                            else '.'))
         return
 
     # 'Yes' before 'No', then the schools with the most posts in your category.
-    df = df.sort_values(['Match', 'Category Posts', 'Subject Posts', 'School Total'],
-                        ascending=[False, False, False, False]).reset_index(drop=True)
+    # A divyang candidate is ranking on a much scarcer number, so when the quota
+    # is on their own type outranks the category total.
+    sort_by = ['Match']
+    if disability:
+        sort_by.append(f'Divyang {disability}')
+    sort_by += ['Category Posts', 'Subject Posts', 'School Total']
+    df = df.sort_values(sort_by, ascending=[False] * len(sort_by)).reset_index(drop=True)
     df.index += 1
 
     matched = df[df['Match'] == 'Yes']
-    m1, m2, m3 = st.columns(3)
-    m1.metric('Schools with your subject', matched['School Code'].nunique())
-    m2.metric('Posts in your subject', int(matched['Subject Posts'].sum()))
-    m3.metric(f'{category} posts at those schools',
-              int(matched.drop_duplicates('School Code')['Category Posts'].sum()))
+    once = matched.drop_duplicates('School Code')
+    tiles = [('Schools with your subject', matched['School Code'].nunique()),
+             ('Posts in your subject', int(matched['Subject Posts'].sum())),
+             (f'{category} posts at those schools', int(once['Category Posts'].sum()))]
+    if 'OPEN Posts' in df.columns:
+        tiles.append(('OPEN posts at those schools', int(once['OPEN Posts'].sum())))
+    if disability:
+        tiles.append((f'{E.DISABILITY_LABEL[disability]} posts',
+                      int(once[f'Divyang {disability}'].sum())))
+    for column, (caption, value) in zip(st.columns(len(tiles)), tiles):
+        column.metric(caption, value)
 
     st.dataframe(df, width='stretch', height=460)
 
     tag = category.replace(' ', '').replace('/', '-')
+    if disability:
+        tag += f'_{disability}'
     suffix = cfg['label'].replace(' ', '')
     stem = f'{person}_TAIT_{tag}_{suffix}' if person else f'TAIT_{tag}_{suffix}'
 
@@ -171,7 +198,7 @@ def render_stream(key, upload, category, parallel, person):
     pdf_warnings = []
     if st.session_state.get(f'{wk}_wantpdf'):
         pdf_bytes, pdf_warnings = build_pdf(
-            df, category, cfg['label'], person, tuple(parallel))
+            df, category, cfg['label'], person, tuple(parallel), disability)
         slot.download_button(
             f'⬇ PDF — {stem}.pdf', pdf_bytes, file_name=f'{stem}.pdf',
             mime='application/pdf', width='stretch', key=f'{wk}_pdf')
@@ -243,7 +270,42 @@ category = d2.selectbox('Your category', E.CATEGORY_ORDER,
 parallel = d3.multiselect('Also show parallel reservation', E.PARALLEL_COLUMNS[:-1],
                           default=['Female'], key=f'par_{nonce}',
                           help='Parallel quotas are carved out of your category total, '
-                               'not added to it.')
+                               'not added to it. Each one is shown for your category '
+                               'and for OPEN, side by side.')
+
+# The divyang quota is off unless asked for: switching it on adds seven columns
+# that mean nothing to the candidates who do not qualify for it.
+p1, p2, p3 = st.columns([2, 1.4, 1.6])
+use_pwd = p1.checkbox('I am applying under the divyang (PwD) quota',
+                      key=f'pwd_{nonce}',
+                      help='Adds each school\'s divyang posts, taken from the '
+                           'दिव्यांग (4%) block the advertisement prints.')
+disability = None
+if use_pwd:
+    disability = p2.selectbox(
+        'Disability type', E.DISABILITY_CODES, key=f'dis_{nonce}',
+        format_func=lambda c: f'{E.DISABILITY_LABEL[c]} ({E.DISABILITY_MARATHI[c]})')
+    # The certificate percentage is the candidate's own and appears in no
+    # advertisement PDF, so it gates eligibility and nothing else. It is never
+    # used to compute a seat count - the roster prints the real figures, and
+    # 4% of the school total disagrees with them on most schools.
+    pct = p3.number_input('Certificate %', min_value=0, max_value=100, step=1,
+                          value=E.BENCHMARK_DISABILITY_PCT, key=f'pct_{nonce}',
+                          help='From your disability certificate. Used only to check '
+                               'the 40% benchmark — it does not change any school’s '
+                               'post count.')
+    if pct < E.BENCHMARK_DISABILITY_PCT:
+        st.warning(f'A certificate below {E.BENCHMARK_DISABILITY_PCT}% is not a benchmark '
+                   'disability, so the divyang quota does not apply. Showing your normal '
+                   f'{category} view instead — check your certificate if this looks wrong.',
+                   icon='⚠️')
+        disability = None
+    else:
+        st.caption(f'ℹ️ Divyang is a **parallel** reservation: these posts are carved out '
+                   f'of the {category} and OPEN totals beside them, not added to them. The '
+                   'counts are the ones each advertisement prints — they are not '
+                   'calculated from the 4% share. This tool cannot confirm your '
+                   'eligibility; only the certificate and the portal can.')
 
 st.subheader('2. Your Generated Preferences PDF(s)')
 st.caption('Upload either one, or both — each gets its own table and its own CSV.')
@@ -273,4 +335,4 @@ for key, upload in uploads.items():
         st.error(f"No cache for this corpus yet — build it from the sidebar, or run "
                  f"`python tait_engine.py build {key}`.")
         continue
-    render_stream(key, upload, category, parallel, person)
+    render_stream(key, upload, category, parallel, person, disability)

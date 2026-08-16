@@ -9,10 +9,13 @@ Two kinds of PDF are involved:
   * one advertisement PDF per school, sitting in the corpus folder. Each holds
     two tables that DO NOT cross-reference each other:
       page 1  reservation roster - 13 category rows x 8 columns, covering the
-              WHOLE school (every level and subject combined).
+              WHOLE school (every level and subject combined), followed by the
+              divyang (4%) and अनाथ (1%) blocks, which sit outside that grid.
       page 2  vacancy table - posts per (designation, subject).
     There is no per-subject category breakdown anywhere in the source, so both
-    numbers are reported side by side rather than merged into one.
+    numbers are reported side by side rather than merged into one. The same
+    holds for divyang: it is a parallel reservation carved out of the category
+    totals, never a separate pool to be added to them.
 
 The Devanagari in these PDFs uses a broken font cmap ('इ.मा.व' extracts as
 'इ.म֞ .व'), so nothing is matched on Marathi text. Categories are identified by
@@ -111,6 +114,38 @@ PARALLEL_COLUMNS = [
 ]
 PARALLEL_INDEX = {name: i for i, name in enumerate(PARALLEL_COLUMNS)}
 
+# The divyang (दिव्यांग, 4%) block sits below the 13 roster rows and OUTSIDE the
+# 8-column grid, so it never reaches _reservation_row. Like the female and sports
+# quotas it is a PARALLEL reservation: its posts are carved out of the category
+# totals above, not added to them.
+#
+# Five buckets in this fixed left-to-right order, each printed with its own 1%
+# marker. As with the categories the Marathi labels are unreliable, so the block
+# is read by position and anchored on the '(1%)', 'ID' and 'MD' tokens - those
+# are Latin and extract cleanly from the broken cmap.
+DISABILITY_TYPES = [
+    ('OH', 'Orthopaedic',             'अस्थिव्यंग'),
+    ('HI', 'Hearing Impaired',        'कर्णबधिर'),
+    ('VI', 'Blind / Low Vision',      'अंध/अल्पदृष्टी'),
+    ('ID', 'Intellectual Disability', 'बौद्धिक अक्षमता'),
+    ('MD', 'Multiple Disability',     'बहुविध अक्षमता'),
+]
+DISABILITY_CODES = [c for c, _, _ in DISABILITY_TYPES]
+DISABILITY_LABEL = {c: label for c, label, _ in DISABILITY_TYPES}
+DISABILITY_MARATHI = {c: mr for c, _, mr in DISABILITY_TYPES}
+
+# A divyang certificate must show at least this much to count as a benchmark
+# disability. It is the CANDIDATE'S OWN figure and appears in no advertisement
+# PDF anywhere, so it can gate eligibility and nothing else - it can never change
+# a school's post count. The counts below are the ones the PDF prints itself;
+# they are never derived from the 4% share, which disagrees with the printed
+# roster on most schools once rounding and carry-forward are applied.
+BENCHMARK_DISABILITY_PCT = 40
+
+# The अनाथ (orphan, 1%) block, immediately below divyang. Same shape, no Latin
+# anchor of its own, so it is found by the '(1%)' heading row that precedes it.
+ORPHAN_COLUMNS = ['Institutional', 'Non-Institutional']
+
 
 # --------------------------------------------------------------------------
 # text helpers
@@ -186,6 +221,41 @@ def _reservation_row(cells):
     return int(serial), nums[-8:]      # trailing 8 == the roster columns
 
 
+def _trailing_int(cell):
+    """Value from a cell that carries its own label.
+
+    The divyang block prints the label and the count in one cell, on two lines,
+    so compaction glues them: 'अस्थिव्यंग(1%)3' -> 3.
+    """
+    m = re.search(r'(\d+)$', cell or '')
+    return int(m.group(1)) if m else None
+
+
+def _disability_row(cells):
+    """Return [OH, HI, VI, ID, MD, TOTAL] if this is the divyang value row.
+
+    Six cells, the last two anchored on the Latin 'ID' / 'MD' tokens. Verified
+    present and identically shaped on all 309 without-interview files and a
+    200-file sample of the with-interview corpus.
+    """
+    if len(cells) != 6 or not (cells[3].startswith('ID') and cells[4].startswith('MD')):
+        return None
+    values = [_trailing_int(c) for c in cells]
+    return None if any(v is None for v in values) else values
+
+
+def _orphan_row(cells):
+    """Return [institutional, non-institutional, TOTAL] for the अनाथ block.
+
+    Its labels are Devanagari only, with nothing Latin to key off, so the caller
+    arms this with the '(1%)' heading row above it and this just checks shape.
+    """
+    if len(cells) != 3:
+        return None
+    values = [_trailing_int(c) for c in cells]
+    return None if any(v is None for v in values) else values
+
+
 def _vacancy_row(cells):
     """Return a raw vacancy dict if this row is a post row, else None.
 
@@ -233,6 +303,8 @@ def parse_school_pdf(path):
         'file': name,
         'path': path,
         'reservation': {},
+        'disability': {},
+        'orphan': {},
         'vacancies': [],
         'school_total': 0,
         'printed_total': None,
@@ -248,6 +320,7 @@ def parse_school_pdf(path):
         rec['notes'].append(f'open failed: {e}')
         return rec
 
+    expect_orphan = False
     with doc:
         for page in doc:
             text = page.get_text()
@@ -273,6 +346,27 @@ def parse_school_pdf(path):
                             rec['reservation'][hit[0]] = hit[1]
                             continue
 
+                        # Neither the divyang nor the अनाथ block carries a serial
+                        # number, so _reservation_row never sees them. Divyang has
+                        # its own ID/MD anchor; अनाथ is armed by the lone '(1%)'
+                        # heading directly above it. The 'ID & MD (1%)' header is
+                        # two cells, so the length check keeps it out.
+                        div = _disability_row(cells)
+                        if div and not rec['disability']:
+                            rec['disability'] = dict(zip(DISABILITY_CODES, div))
+                            rec['disability']['TOTAL'] = div[5]
+                            continue
+                        if len(cells) == 1 and '(1%)' in cells[0]:
+                            expect_orphan = True
+                            continue
+                        if expect_orphan:
+                            orph = _orphan_row(cells)
+                            if orph:
+                                rec['orphan'] = dict(zip(ORPHAN_COLUMNS, orph))
+                                rec['orphan']['TOTAL'] = orph[2]
+                                expect_orphan = False
+                                continue
+
                     # The vacancy table prints its own total; keeping it lets the
                     # parser be checked against the PDF's own arithmetic.
                     if cells[0].lower() == 'total' and cells[-1].isdigit():
@@ -295,6 +389,17 @@ def parse_school_pdf(path):
         rec['notes'].append(
             f'PARSE ERROR: summed {rec["school_total"]} posts but the PDF prints '
             f'{rec["printed_total"]}')
+
+    # Same self-check for the divyang block: the five buckets must add up to the
+    # total the block prints beside them.
+    if rec['disability']:
+        buckets = sum(rec['disability'][c] for c in DISABILITY_CODES)
+        if buckets != rec['disability']['TOTAL']:
+            rec['notes'].append(
+                f'PARSE ERROR: divyang buckets sum to {buckets} but the block '
+                f'prints {rec["disability"]["TOTAL"]}')
+    else:
+        rec['notes'].append('divyang block not found')
 
     # Not a parsing bug: on ~11% of files the school-wide roster counts more
     # posts than the vacancy table advertises. Both numbers are the PDF's own,
@@ -554,7 +659,8 @@ def dedupe_schools(prefs):
 
 
 def analyse(prefs, idx, subjects=None, category='OPEN', designations=None,
-            aid_types=None, employers=None, parallel=None):
+            aid_types=None, employers=None, parallel=None, disability=None,
+            only_disability=False):
     """Cross the candidate's eligible schools with the corpus.
 
     subjects / designations / aid_types / employers are display-name filters;
@@ -562,17 +668,53 @@ def analyse(prefs, idx, subjects=None, category='OPEN', designations=None,
     is an optional list of PARALLEL_COLUMNS names to report alongside the
     category total.
 
+    OPEN is reported alongside the chosen category on every sheet, because a
+    reserved-category candidate competes in OPEN as well - a school with 2 OBC
+    and 20 OPEN posts is a very different prospect from one with 2 and 2, and
+    the category column alone cannot tell them apart. Each parallel quota is
+    likewise reported for both blocks, so a female OBC candidate sees her OBC
+    total, the female share of it, the OPEN total and the female share of that.
+
+    `disability` is a DISABILITY_CODES entry, or None for candidates not
+    applying under the divyang quota. When set, the school's divyang counts are
+    added with the candidate's own type first; `only_disability` further drops
+    the schools with no post in that type. The counts are the PDF's own printed
+    figures - nothing here is derived from the 4% share.
+
     Every school from the preference PDF gets at least one row. Schools with no
     vacancy in the selected subjects come back with Match = 'No' and 0 posts, so
     nothing disappears from the list.
     """
     cat_no = CATEGORY_BY_LABEL[category]
+    open_no = CATEGORY_BY_LABEL['OPEN']
+    show_open = category != 'OPEN'          # no point printing the column twice
     parallel = parallel or []
     subjects = set(subjects) if subjects else None
     designations = set(designations) if designations else None
     aid_types = set(aid_types) if aid_types else None
     employers = set(employers) if employers else None
 
+    # The candidate's own disability type leads, so their number is the first
+    # one they hit; the other four follow for completeness.
+    dis_codes = ([disability] + [c for c in DISABILITY_CODES if c != disability]
+                 if disability else [])
+
+    def quota_block(roster, open_roster, dis, orph):
+        block = {
+            'Category': category,
+            'Category Posts': roster[PARALLEL_INDEX['TOTAL']],
+            **{f'Category {p}': roster[PARALLEL_INDEX[p]] for p in parallel},
+        }
+        if show_open:
+            block['OPEN Posts'] = open_roster[PARALLEL_INDEX['TOTAL']]
+            block.update({f'OPEN {p}': open_roster[PARALLEL_INDEX[p]] for p in parallel})
+        if disability:
+            block.update({f'Divyang {c}': dis.get(c, 0) for c in dis_codes})
+            block['Divyang Total'] = dis.get('TOTAL', 0)
+            block['Orphan Total'] = orph.get('TOTAL', 0)
+        return block
+
+    empty_roster = [0] * 8
     out = []
     for pref in dedupe_schools(prefs):
         rec, note = lookup(idx, pref['code'], pref['level_code'], pref['medium'])
@@ -588,28 +730,29 @@ def analyse(prefs, idx, subjects=None, category='OPEN', designations=None,
         }
 
         if rec is None:
+            # A school with no advertisement stays on the list rather than
+            # vanishing, but it has nothing to filter on - including the divyang
+            # filter, which would otherwise silently drop it.
             out.append({**base, 'Subject': '', 'Designation': '', 'Aid Type': '',
-                        'Subject Posts': 0, 'Category': category,
-                        'Category Posts': 0, 'School Total': 0,
-                        'Category Share %': 0.0, 'Match': 'No',
-                        **{p: 0 for p in parallel},
-                        'Status': note})
+                        'Subject Posts': 0,
+                        **quota_block(empty_roster, empty_roster, {}, {}),
+                        'School Total': 0, 'Match': 'No', 'Status': note})
             continue
 
         if employers is not None and rec['employer'] not in employers:
             continue
 
-        roster = rec['reservation'].get(cat_no, [0] * 8)
-        cat_posts = roster[PARALLEL_INDEX['TOTAL']]
-        total = rec['school_total']
-        share = round(100.0 * cat_posts / total, 1) if total else 0.0
+        dis = rec.get('disability') or {}
+        orph = rec.get('orphan') or {}
+        if only_disability and not dis.get(disability, 0):
+            continue
+
+        roster = rec['reservation'].get(cat_no, empty_roster)
+        open_roster = rec['reservation'].get(open_no, empty_roster)
         common = {
             **base,
-            'Category': category,
-            'Category Posts': cat_posts,
-            'School Total': total,
-            'Category Share %': share,
-            **{p: roster[PARALLEL_INDEX[p]] for p in parallel},
+            **quota_block(roster, open_roster, dis, orph),
+            'School Total': rec['school_total'],
             'Status': '; '.join([note] + rec['notes']).strip('; '),
         }
 
@@ -637,9 +780,14 @@ def analyse(prefs, idx, subjects=None, category='OPEN', designations=None,
     column_order = [
         'School Code', 'School Name', 'District', 'Level', 'Medium', 'Employer',
         'Subject', 'Designation', 'Aid Type', 'Subject Posts',
-        'Category', 'Category Posts', *parallel,
-        'School Total', 'Category Share %', 'Match', 'Eligible As', 'Status',
+        'Category', 'Category Posts', *[f'Category {p}' for p in parallel],
     ]
+    if show_open:
+        column_order += ['OPEN Posts', *[f'OPEN {p}' for p in parallel]]
+    if disability:
+        column_order += [f'Divyang {c}' for c in dis_codes]
+        column_order += ['Divyang Total', 'Orphan Total']
+    column_order += ['School Total', 'Match', 'Eligible As', 'Status']
     return out, column_order
 
 
@@ -691,6 +839,20 @@ def _summarise(payload):
     print('  levels: ' + ', '.join(f'{k or "?"}={v}' for k, v in sorted(levels.items())))
     employers = Counter(s['employer'] for s in schools)
     print('  employers: ' + ', '.join(f'{k or "?"}={v}' for k, v in employers.most_common()))
+
+    # Divyang posts are scarce, so say how scarce - a PwD candidate's shortlist
+    # is a fraction of everyone else's and that is worth knowing up front.
+    with_div = [s for s in schools if (s.get('disability') or {}).get('TOTAL')]
+    div_posts = sum(s['disability']['TOTAL'] for s in with_div)
+    print(f'  divyang: {len(with_div)}/{len(schools)} schools carry a post, '
+          f'{div_posts} posts total')
+    by_type = Counter()
+    for s in schools:
+        for code in DISABILITY_CODES:
+            by_type[code] += (s.get('disability') or {}).get(code, 0)
+    print('    by type: ' + ', '.join(f'{k}={v}' for k, v in by_type.items()))
+    orphan_posts = sum((s.get('orphan') or {}).get('TOTAL', 0) for s in schools)
+    print(f'  orphan (अनाथ): {orphan_posts} posts total')
     errors = [n for s in schools for n in s['notes'] if n.startswith('PARSE ERROR')]
     if errors:
         print(f'  *** {len(errors)} PARSE ERRORS ***')

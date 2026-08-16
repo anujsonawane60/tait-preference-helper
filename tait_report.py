@@ -25,6 +25,10 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (BaseDocTemplate, Frame, PageTemplate, Paragraph,
                                 Spacer, Table, TableStyle)
 
+# Constants only - tait_engine has no UI dependency either, so this keeps the
+# disability labels defined in exactly one place.
+from tait_engine import DISABILITY_LABEL
+
 BRAND = colors.HexColor('#1a4d7a')
 BAND = colors.HexColor('#eef3f8')
 RULE = colors.HexColor('#c3d3e2')
@@ -45,10 +49,20 @@ LAYOUT = [
     ('Subject',        'Subject', 34),
     ('Aid Type',       'Aid',     15),
     ('Subject Posts',  'Subj',    12),
-    ('Category Posts', 'Cat',     12),
-    ('School Total',   'Total',   13),
-    ('Category Share %', 'Cat %', 13),
 ]
+
+# Printed after the quota block, which is assembled per report because its
+# columns depend on the category, the parallel quotas ticked and whether the
+# candidate is applying under the divyang quota.
+TAIL = [('School Total', 'Total', 13)]
+
+# Parallel-quota headings have to survive being prefixed with a category, so
+# they are cut to two characters rather than the six a bare column got.
+PARALLEL_ABBR = {
+    'Female': 'F', 'Ex-Serviceman': 'Ex', 'Part-Time': 'PT',
+    'Project-Affected': 'Pr', 'Earthquake-Affected': 'Eq', 'Sports': 'Sp',
+    'Non-Parallel': 'NP',
+}
 
 # Column values are shortened so the printed row stays on one line.
 SHORTEN = {
@@ -60,11 +74,15 @@ SHORTEN = {
 }
 
 DISCLAIMER = (
-    '<b>Subject</b> and <b>Cat</b> come from two separate tables in each advertisement. '
-    'The PDF publishes subject-wise vacancies and a school-wide reservation roster, but '
-    'never states which category a particular subject post belongs to — read the two '
-    'columns side by side, do not combine them. Figures are taken from the official '
-    'advertisement PDFs; this is an information aid and guarantees no posting.'
+    '<b>Subj</b> and the category columns come from two separate tables in each '
+    'advertisement. The PDF publishes subject-wise vacancies and a school-wide '
+    'reservation roster, but never states which category a particular subject post '
+    'belongs to — read the columns side by side, do not combine them. '
+    'The parallel quotas (female, sports, divyang) are carved <i>out of</i> the totals '
+    'beside them, not added to them, and the divyang figures are the ones each PDF '
+    'prints — they are not calculated from the 4% share. '
+    'Figures are taken from the official advertisement PDFs; this is an information aid, '
+    'it confirms no one’s eligibility and guarantees no posting.'
 )
 
 
@@ -88,11 +106,16 @@ def _is_latin(text):
     return all(ord(c) < 0x0250 for c in text)
 
 
-def build_report(df, category, stream_label, person='', parallel=()):
+def build_report(df, category, stream_label, person='', parallel=(), disability=None):
     """Render the results table to PDF bytes.
 
     `df` is the dataframe already shown on screen, so the report always matches
     what the candidate is looking at. Returns (pdf_bytes, warnings).
+
+    `disability` is a tait_engine disability code or None. The printed sheet
+    carries only the candidate's own type and the divyang total; the CSV keeps
+    all five buckets. A sheet meant to be worked down while filling the portal
+    cannot afford five more columns without wrapping every row onto two lines.
     """
     warnings = []
     name_font = 'Helvetica-Bold'
@@ -110,11 +133,23 @@ def build_report(df, category, stream_label, person='', parallel=()):
                 'of the PDF heading. The CSV filename still uses it.')
             person = ''
 
-    parallel = [p for p in parallel if p in df.columns]
+    # Headings name the block they belong to — 'OBC' / 'OBC-F' / 'OPEN' /
+    # 'OPEN-F' — because a bare 'Female' next to two totals is exactly the
+    # column a candidate reads against the wrong one.
+    parallel = [p for p in parallel if f'Category {p}' in df.columns]
+    short_cat = category.split('/')[0].strip()[:4]
     layout = list(LAYOUT)
-    at = [c for c, _, _ in layout].index('School Total')
-    for offset, p in enumerate(parallel):   # slot parallel quotas after Cat
-        layout.insert(at + offset, (p, p[:6], 13))
+    layout.append(('Category Posts', short_cat, 12))
+    for p in parallel:
+        layout.append((f'Category {p}', f'{short_cat}-{PARALLEL_ABBR.get(p, p[:2])}', 13))
+    if 'OPEN Posts' in df.columns:          # absent when OPEN is the category
+        layout.append(('OPEN Posts', 'OPEN', 12))
+        for p in parallel:
+            layout.append((f'OPEN {p}', f'OPEN-{PARALLEL_ABBR.get(p, p[:2])}', 13))
+    if disability and f'Divyang {disability}' in df.columns:
+        layout.append((f'Divyang {disability}', disability, 11))
+        layout.append(('Divyang Total', 'Divy', 11))
+    layout += TAIL
 
     styles = getSampleStyleSheet()
     cell = ParagraphStyle('cell', parent=styles['BodyText'], fontSize=7.2,
@@ -134,15 +169,29 @@ def build_report(df, category, stream_label, person='', parallel=()):
     cat_posts = (int(matched.drop_duplicates('School Code')['Category Posts'].sum())
                  if len(matched) else 0)
 
+    heading = f'{stream_label} &nbsp;•&nbsp; Category: <b>{category}</b>'
+    if disability:
+        heading += f' &nbsp;•&nbsp; Divyang: <b>{DISABILITY_LABEL.get(disability, disability)}</b>'
+    if person:
+        heading += f' &nbsp;•&nbsp; {person}'
+
     story = [
         Paragraph('TAIT — School Preference List', title),
-        Paragraph(f'{stream_label} &nbsp;•&nbsp; Category: <b>{category}</b>'
-                  + (f' &nbsp;•&nbsp; {person}' if person else ''), sub),
+        Paragraph(heading, sub),
         Paragraph(f'{schools} schools with your subject &nbsp;•&nbsp; '
                   f'{subj_posts} posts in your subject &nbsp;•&nbsp; '
                   f'{cat_posts} {category} posts at those schools', sub),
         Spacer(1, 5 * mm),
     ]
+    if disability:
+        col = f'Divyang {disability}'
+        div_schools = int((matched.drop_duplicates('School Code')[col] > 0).sum()) \
+            if len(matched) and col in matched.columns else 0
+        div_posts = int(matched.drop_duplicates('School Code')[col].sum()) \
+            if len(matched) and col in matched.columns else 0
+        story.insert(3, Paragraph(
+            f'{div_posts} {DISABILITY_LABEL.get(disability, disability)} post(s) '
+            f'across {div_schools} of those schools', sub))
 
     body = [[Paragraph(h, head) for _, h, _ in layout]]
     for n, (_, row) in enumerate(df.iterrows(), 1):

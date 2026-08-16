@@ -30,7 +30,8 @@ python -m streamlit run app.py
 
 ### Using the app
 
-1. **Enter your name and category** once — they apply to both streams.
+1. **Enter your name and category** once — they apply to both streams. Tick the
+   **divyang (PwD) quota** box if it applies to you and pick your disability type.
 2. **Upload** your `GeneratedPreferences_*.pdf`. There are two boxes, **With Interview**
    and **Without Interview**; fill in whichever you have, or both.
 3. **Adjust subject / post level** if needed — they arrive pre-ticked from your own PDF.
@@ -77,7 +78,7 @@ Useful extras:
 python tait_engine.py info               # what's in the cache right now
 ```
 
-The corpus is parsed **once** into `cache/schools.json` (3 MB). Every analysis after that
+Each corpus is parsed **once** into its own cache (3.3 MB and 0.4 MB). Every analysis after that
 is a lookup, not a PDF parse, so it returns in under a second no matter how many people
 use it. Rebuild only when the advertisement PDFs change — sidebar button, or re-run the
 `build` command.
@@ -111,9 +112,12 @@ them side by side; do not multiply or intersect them.
 | `Subject Posts` | vacancies in that subject at that level |
 | `Category` | the category you selected |
 | `Category Posts` | that category's total in the school-wide roster |
-| `Female`, `Sports`, … | parallel quotas *inside* `Category Posts` — a subset, not an addition |
+| `Category Female`, `Category Sports`, … | parallel quotas *inside* `Category Posts` — a subset, not an addition |
+| `OPEN Posts` | the OPEN row's total, shown on every sheet (omitted only when OPEN *is* your category) |
+| `OPEN Female`, … | the same parallel quotas inside `OPEN Posts` |
+| `Divyang OH / HI / VI / ID / MD` | divyang posts by type, your own type first. Only when the quota box is ticked |
+| `Divyang Total`, `Orphan Total` | the totals those blocks print |
 | `School Total` | all advertised posts at the school |
-| `Category Share %` | `Category Posts / School Total` |
 | `Match` | `Yes` if the school has a vacancy in your selected subject(s) |
 | `Eligible As` | the subject(s) your own preference PDF lists for this school |
 | `Status` | blank when clean; otherwise the parsing or matching caveat |
@@ -121,6 +125,54 @@ them side by side; do not multiply or intersect them.
 Every school from your preference PDF appears in the output. Schools with no vacancy in
 your subject come back with `Match = No` and `0` posts rather than being dropped, so you can
 still see and re-sort the full list.
+
+**OPEN is always shown.** A reserved-category candidate competes in OPEN as well, and the
+two blocks vary independently — `272016SC001` advertises 68 OBC posts and **zero** OPEN out
+of 190, while other schools are the reverse. The category column alone cannot tell those
+apart, so both are printed side by side. Each parallel quota you tick is likewise shown for
+both blocks: a female OBC candidate gets `Category Posts`, `Category Female`, `OPEN Posts`
+and `OPEN Female`.
+
+The printed sheet keeps the same figures but heads them by block — `OBC`, `OBC-F`, `OPEN`,
+`OPEN-F` — because a bare `Female` next to two totals is exactly the column somebody reads
+against the wrong one.
+
+## The divyang (दिव्यांग) quota
+
+Below the 13 roster rows each advertisement prints a **दिव्यांग (4%)** block and an
+**अनाथ (1%)** block, both outside the 8-column grid. They carry no serial number, so they
+are found by the `(1%)` / `(4%)` markers and the `ID` / `MD` tokens — all Latin, so none of
+this depends on the broken Devanagari cmap. Five buckets, read left to right by position:
+
+| Code | Type | Marathi |
+|---|---|---|
+| `OH` | Orthopaedic | अस्थिव्यंग |
+| `HI` | Hearing Impaired | कर्णबधिर |
+| `VI` | Blind / Low Vision | अंध/अल्पदृष्टी |
+| `ID` | Intellectual Disability | — |
+| `MD` | Multiple Disability | — |
+
+The block prints its own total, so the build self-checks the five buckets against it the
+same way the vacancy table is checked. **All 2,725 files parse and reconcile; zero errors.**
+
+Two things the tool deliberately will not do:
+
+- **It never derives a seat count from the 4% share.** The roster prints the real figures,
+  and 4% of the school total disagrees with them on most schools once rounding and
+  carry-forward are applied. Only the printed numbers are reported.
+- **The certificate percentage gates eligibility and nothing else.** The candidate's own
+  percentage (40% is the benchmark threshold) appears in no advertisement PDF anywhere, so
+  it cannot change any school's post count. Below 40% the app says the quota does not apply
+  and falls back to the normal category view.
+
+Divyang is a **parallel** reservation — carved out of the category totals beside it, not
+added to them, exactly like the female and sports quotas.
+
+**These posts are scarce.** Only 174 of 2,416 with-interview schools (7%) advertise one, for
+217 posts total, and 173 of those are `OH`. The without-interview stream is denser —
+110 of 309 schools (36%), 758 posts, spread far more evenly across the five types. Ticking
+*show only schools with a post in my type* can cut a 600-school list to a handful, so it is
+off by default.
 
 ## Matching
 
@@ -174,6 +226,10 @@ the preference PDF instead of a hand-maintained `school_codes.csv`.
 
 The parser was cross-checked against the old `extract_pade.py` output on the 609 files both
 had processed — **609/609 identical** on OBC totals and on Maths / Science / Maths-Science
-counts. It also verifies itself on every build: each file's summed post count is compared
-against the `Total` the PDF prints, and any disagreement is flagged as `PARSE ERROR`.
-Across all 2,416 files there are currently **zero**.
+counts. It also verifies itself on every build, twice over:
+
+- each file's summed post count against the `Total` the vacancy table prints;
+- the five divyang buckets against the total the divyang block prints.
+
+Either disagreement is flagged as `PARSE ERROR`. Across all 2,725 files in both corpora
+there are currently **zero**, and every file yields a divyang block.
